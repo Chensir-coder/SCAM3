@@ -1,0 +1,479 @@
+# @package _global_
+defaults:
+  - _self_
+
+# ============================================================================
+# OSRS-Crack fine-tuning config for SAM3 image model
+# ============================================================================
+
+paths:
+  # 改成你的 OSRS-Crack 数据集根目录
+  # 该目录下应该有：
+  #   OSRS-Crack_train_expanded.json
+  #   OSRS-Crack_train_mask_cache.json
+  #   OSRS-Crack_val_expanded.json
+  #   OSRS-Crack_val_mask_cache.json
+  #   images/
+  #   masks/
+  osrs_crack_root: /root/code/sam3-main/datasets/opencrack
+
+  # 日志和 checkpoint 输出目录
+  experiment_log_dir: /root/code/sam3-main/experiments/sam3_osrs_crack
+
+  # 可以填 null，让 build_sam3_image_model 自动使用包内默认 bpe
+  # 如果你的环境需要显式指定，就改成：
+  # /path/to/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  bpe_path: null
+
+  # 如果你本地已有 SAM3 checkpoint，可以填路径，并把 load_from_HF 设为 false
+  # 如果希望自动从 HF 下载，checkpoint_path 保持 null，load_from_HF 保持 true
+  checkpoint_path: /root/code/sam3-main/checkpoint/sam3/sam3.pt
+  load_from_HF: false
+
+
+# ============================================================================
+# Dataset and transform configuration
+# ============================================================================
+
+osrs_crack:
+  train_ann_file: ${paths.osrs_crack_root}/OSRS-Crack_train_expanded.json
+  train_mask_cache_file: ${paths.osrs_crack_root}/OSRS-Crack_train_mask_cache.json
+
+  val_ann_file: ${paths.osrs_crack_root}/OSRS-Crack_val_expanded.json
+  val_mask_cache_file: ${paths.osrs_crack_root}/OSRS-Crack_val_mask_cache.json
+
+  # 训练 transform
+  train_transforms:
+    - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
+      transforms:
+        # 去掉 crowd query
+        - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+          query_filter:
+            _target_: sam3.train.transforms.filter_query_transforms.FilterCrowds
+
+        # RLE -> binary mask
+        - _target_: sam3.train.transforms.segmentation.DecodeRle
+
+        # resize 到 SAM3 默认训练分辨率附近
+        - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
+          sizes:
+            _target_: sam3.train.transforms.basic.get_random_resize_scales
+            size: ${scratch.resolution}
+            min_size: ${scratch.min_resize_size}
+            rounded: false
+          max_size:
+            _target_: sam3.train.transforms.basic.get_random_resize_max_size
+            size: ${scratch.resolution}
+          square: true
+          consistent_transform: ${scratch.consistent_transform}
+
+        # pad 成固定输入尺寸，方便 batch collate
+        - _target_: sam3.train.transforms.basic_for_api.PadToSizeAPI
+          size: ${scratch.resolution}
+          consistent_transform: ${scratch.consistent_transform}
+
+        - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
+
+        # 防止 resize / pad 后出现空 target
+        - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+          query_filter:
+            _target_: sam3.train.transforms.filter_query_transforms.FilterEmptyTargets
+
+        - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
+          mean: ${scratch.train_norm_mean}
+          std: ${scratch.train_norm_std}
+
+        - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+          query_filter:
+            _target_: sam3.train.transforms.filter_query_transforms.FilterEmptyTargets
+
+    - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+      query_filter:
+        _target_: sam3.train.transforms.filter_query_transforms.FilterFindQueriesWithTooManyOut
+        max_num_objects: ${scratch.max_ann_per_img}
+
+  # 验证 transform
+  val_transforms:
+    - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
+      transforms:
+        - _target_: sam3.train.transforms.segmentation.DecodeRle
+
+        - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
+          sizes: ${scratch.resolution}
+          max_size:
+            _target_: sam3.train.transforms.basic.get_random_resize_max_size
+            size: ${scratch.resolution}
+          square: true
+          consistent_transform: false
+
+        - _target_: sam3.train.transforms.basic_for_api.PadToSizeAPI
+          size: ${scratch.resolution}
+          consistent_transform: false
+
+        - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
+
+        - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+          query_filter:
+            _target_: sam3.train.transforms.filter_query_transforms.FilterEmptyTargets
+
+        - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
+          mean: ${scratch.val_norm_mean}
+          std: ${scratch.val_norm_std}
+
+  # SAM3 loss，包含 box / classification / mask
+  loss:
+    _target_: sam3.train.loss.sam3_loss.Sam3LossWrapper
+    matcher: ${scratch.matcher}
+    o2m_weight: 0.0
+    o2m_matcher:
+      _target_: sam3.train.matcher.BinaryOneToManyMatcher
+      alpha: 0.3
+      threshold: 0.4
+      topk: 4
+    use_o2m_matcher_on_o2m_aux: false
+
+    loss_fns_find:
+      - _target_: sam3.train.loss.loss_fns.Boxes
+        weight_dict:
+          loss_bbox: ${scratch.loss_bbox_weight}
+          loss_giou: ${scratch.loss_giou_weight}
+
+      - _target_: sam3.train.loss.loss_fns.IABCEMdetr
+        weak_loss: false
+        weight_dict:
+          loss_ce: ${scratch.loss_ce_weight}
+          presence_loss: ${scratch.presence_loss_weight}
+        pos_weight: ${scratch.cls_pos_weight}
+        alpha: 0.25
+        gamma: 2
+        use_presence: true
+        pos_focal: false
+        pad_n_queries: 200
+        pad_scale_pos: 1.0
+
+      - _target_: sam3.train.loss.loss_fns.Masks
+        focal_alpha: 0.25
+        focal_gamma: 2.0
+        weight_dict:
+          loss_mask: ${scratch.loss_mask_weight}
+          loss_dice: ${scratch.loss_dice_weight}
+        compute_aux: false
+
+    loss_fn_semantic_seg: null
+    scale_by_find_batch_size: ${scratch.scale_by_find_batch_size}
+
+
+# ============================================================================
+# Scratch / hyperparameters
+# ============================================================================
+
+scratch:
+  # 必须为 true，否则模型不输出 mask，collate 也不会带 mask
+  enable_segmentation: true
+
+  # SAM3 ViT RoPE 在 img_size=1008（72×72 patch）下预计算，训练分辨率必须为 1008
+  resolution: 1008
+  min_resize_size: 416
+  consistent_transform: false
+
+  # 每条 OSRS expanded sample 只有一个 query，一个 object
+  max_ann_per_img: 10
+  max_train_queries: 10
+  max_val_queries: 10
+
+  # Normalization
+  train_norm_mean: [0.5, 0.5, 0.5]
+  train_norm_std: [0.5, 0.5, 0.5]
+  val_norm_mean: [0.5, 0.5, 0.5]
+  val_norm_std: [0.5, 0.5, 0.5]
+
+  # dataloader
+  num_train_workers: 8
+  num_val_workers: 4
+  train_batch_size: 16
+  val_batch_size: 1
+
+  # collate
+  hybrid_repeats: 1
+  collate_fn:
+    _target_: sam3.train.data.collator.collate_fn_api_with_chunking
+    _partial_: true
+    num_chunks: ${scratch.gradient_accumulation_steps}
+    repeats: ${scratch.hybrid_repeats}
+    dict_key: all
+    with_seg_masks: ${scratch.enable_segmentation}
+
+  collate_fn_val:
+    _target_: sam3.train.data.collator.collate_fn_api
+    _partial_: true
+    repeats: ${scratch.hybrid_repeats}
+    dict_key: all
+    with_seg_masks: ${scratch.enable_segmentation}
+
+  # matcher
+  matcher:
+    _target_: sam3.train.matcher.BinaryHungarianMatcherV2
+    focal: true
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+    alpha: 0.25
+    gamma: 2
+    stable: true
+
+  scale_by_find_batch_size: true
+
+  # bbox 是辅助定位
+  loss_bbox_weight: 1.0
+  loss_giou_weight: 0.5
+
+  # classification 是 query-object / slot objectness，不是语义类别
+  loss_ce_weight: 5.0
+  presence_loss_weight: 5.0
+  cls_pos_weight: 5.0
+
+  # mask 是主任务
+  loss_mask_weight: 50.0
+  loss_dice_weight: 10.0
+
+  # optimization
+  # micro-batch=4（1008 分辨率下 25GB 显存安全值），accum=4 → 有效 batch=16
+  gradient_accumulation_steps: 1
+
+  # 最稳策略：冻结 vision/language，只训练 head/decoder，先完整跑完 1 epoch
+  lr_transformer: 1.0e-5
+  lr_vision_backbone: 0.0
+  lr_language_backbone: 0.0
+
+  lrd_vision_backbone: 0.9
+  wd: 0.1
+
+  # 1 epoch × ~7749 step（4×4=16），LR 按单轮 step 总量对齐
+  scheduler_warmup: 1000
+  scheduler_timescale: 8000
+  scheduler_cooldown: 500
+
+  gather_pred_via_filesys: false
+
+
+# ============================================================================
+# Trainer
+# ============================================================================
+
+trainer:
+  _target_: sam3.train.trainer.Trainer
+
+  mode: train_only
+  accelerator: cuda
+  seed_value: 123
+
+  max_epochs: 1
+  val_epoch_freq: 1
+  skip_first_val: true
+
+  skip_saving_ckpts: false
+  empty_gpu_mem_cache_after_eval: true
+  gradient_accumulation_steps: ${scratch.gradient_accumulation_steps}
+
+  distributed:
+    backend: nccl
+    find_unused_parameters: true
+    gradient_as_bucket_view: true
+
+  loss:
+    all: ${osrs_crack.loss}
+    default:
+      _target_: sam3.train.loss.sam3_loss.DummyLoss
+
+  data:
+    train:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+
+        img_folder: ${paths.osrs_crack_root}
+        ann_file: ${osrs_crack.train_ann_file}
+
+        coco_json_loader:
+          _target_: sam3.train.data.osrs_crack_loader.OSRS_CRACK_FROM_JSON
+          mask_cache_file: ${osrs_crack.train_mask_cache_file}
+          original_cat_id: 1
+          source_name: osrs_crack
+          strict: true
+          _partial_: true
+
+        transforms: ${osrs_crack.train_transforms}
+        load_segmentation: ${scratch.enable_segmentation}
+
+        max_ann_per_img: ${scratch.max_ann_per_img}
+        max_train_queries: ${scratch.max_train_queries}
+        max_val_queries: ${scratch.max_val_queries}
+
+        multiplier: 1
+        training: true
+        use_caching: false
+
+        # 全量训练使用所有训练样本
+        limit_ids: null
+
+      shuffle: true
+      # Dataloader reads one optimizer-step batch, then collate_fn chunks it for grad accumulation.
+      batch_size: ${times:${scratch.train_batch_size},${scratch.gradient_accumulation_steps}}
+      num_workers: ${scratch.num_train_workers}
+      pin_memory: true
+
+      # 如果你严格希望单卡下一个 epoch 遍历所有样本，不丢最后一个 batch，设 false
+      drop_last: false
+
+      collate_fn: ${scratch.collate_fn}
+
+    val:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+
+        img_folder: ${paths.osrs_crack_root}
+        ann_file: ${osrs_crack.val_ann_file}
+
+        coco_json_loader:
+          _target_: sam3.train.data.osrs_crack_loader.OSRS_CRACK_FROM_JSON
+          mask_cache_file: ${osrs_crack.val_mask_cache_file}
+          original_cat_id: 1
+          source_name: osrs_crack
+          strict: true
+          _partial_: true
+
+        transforms: ${osrs_crack.val_transforms}
+        load_segmentation: ${scratch.enable_segmentation}
+
+        max_ann_per_img: ${scratch.max_ann_per_img}
+        max_train_queries: ${scratch.max_train_queries}
+        max_val_queries: ${scratch.max_val_queries}
+
+        multiplier: 1
+        training: false
+        use_caching: false
+        # 全量验证（15810 条，单卡约 1~2 小时/次）
+        limit_ids: null
+
+      shuffle: false
+      batch_size: ${scratch.val_batch_size}
+      num_workers: ${scratch.num_val_workers}
+      pin_memory: true
+      drop_last: false
+      collate_fn: ${scratch.collate_fn_val}
+
+  model:
+    _target_: sam3.model_builder.build_sam3_image_model
+    bpe_path: ${paths.bpe_path}
+    device: cpus
+    eval_mode: false
+    checkpoint_path: ${paths.checkpoint_path}
+    load_from_HF: ${paths.load_from_HF}
+    enable_segmentation: ${scratch.enable_segmentation}
+    freeze_vision_backbone: true
+    freeze_language_backbone: true
+    freeze_semantic_seg_head: true
+
+  # 先不接 COCO evaluator。
+  # 当前 val 阶段会计算 val loss。
+  # 后续我们再单独写 OSRS 的 mIoU / Dice / clDice / Boundary-F evaluator。
+  meters: {}
+
+  optim:
+    amp:
+      enabled: false
+      amp_dtype: bfloat16
+
+    optimizer:
+      _target_: torch.optim.AdamW
+
+    gradient_clip:
+      _target_: sam3.train.optim.optimizer.GradientClipper
+      max_norm: 0.05
+      norm_type: 2
+
+    param_group_modifiers:
+      - _target_: sam3.train.optim.optimizer.layer_decay_param_modifier
+        _partial_: true
+        layer_decay_value: ${scratch.lrd_vision_backbone}
+        apply_to: 'backbone.vision_backbone.trunk'
+        overrides:
+          - pattern: '*pos_embed*'
+            value: 1.0
+
+    options:
+      lr:
+        - scheduler:
+            _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+            base_lr: ${scratch.lr_transformer}
+            timescale: ${scratch.scheduler_timescale}
+            warmup_steps: ${scratch.scheduler_warmup}
+            cooldown_steps: ${scratch.scheduler_cooldown}
+
+        - scheduler:
+            _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+            base_lr: ${scratch.lr_vision_backbone}
+            timescale: ${scratch.scheduler_timescale}
+            warmup_steps: ${scratch.scheduler_warmup}
+            cooldown_steps: ${scratch.scheduler_cooldown}
+          param_names:
+            - 'backbone.vision_backbone.*'
+
+        - scheduler:
+            _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+            base_lr: ${scratch.lr_language_backbone}
+            timescale: ${scratch.scheduler_timescale}
+            warmup_steps: ${scratch.scheduler_warmup}
+            cooldown_steps: ${scratch.scheduler_cooldown}
+          param_names:
+            - 'backbone.language_backbone.*'
+
+      weight_decay:
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: ${scratch.wd}
+
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: 0.0
+          param_names:
+            - '*bias*'
+          module_cls_names:
+            - 'torch.nn.LayerNorm'
+
+  checkpoint:
+    save_dir: ${launcher.experiment_log_dir}/checkpoints
+    save_freq: 1
+
+  logging:
+    tensorboard_writer:
+      _target_: sam3.train.utils.logger.make_tensorboard_logger
+      log_dir: ${launcher.experiment_log_dir}/tensorboard
+      flush_secs: 120
+      should_log: true
+
+    wandb_writer: null
+    log_dir: ${launcher.experiment_log_dir}/logs
+    log_freq: 10
+
+
+# ============================================================================
+# Launcher / submitit
+# ============================================================================
+
+launcher:
+  num_nodes: 1
+  gpus_per_node: 1
+  experiment_log_dir: ${paths.experiment_log_dir}
+  multiprocessing_context: forkserver
+
+submitit:
+  account: null
+  partition: null
+  qos: null
+  timeout_hour: 72
+  use_cluster: false
+  cpus_per_task: 8
+  port_range: [10000, 65000]
+  constraint: null

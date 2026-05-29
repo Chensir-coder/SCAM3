@@ -114,6 +114,15 @@ def collate_fn_api_with_chunking(
     load_image_in_fp16: bool = False,
 ):
     assert num_chunks >= 1, "num_chunks must be >= 1"
+    if num_chunks == 1:
+        return collate_fn_api(
+            batch,
+            dict_key,
+            with_seg_masks,
+            input_points_embedding_dim,
+            repeats,
+            load_image_in_fp16,
+        )
 
     # split the batch into num_chunks chunks
     batch_chunks = [batch[i::num_chunks] for i in range(num_chunks)]

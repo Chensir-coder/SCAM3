@@ -4,11 +4,13 @@ __pycache__/
 *$py.class
 
 # self
-checkpoint/
-outputs/
+anno/
 assets/
+checkpoint/
+datasets/
 examples/
-
+experiments/
+outputs/
 
 # C extensions
 *.so

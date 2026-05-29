@@ -605,6 +605,17 @@ class BinaryHungarianMatcherV2(nn.Module):
             + self.cost_class * cost_class
             + self.cost_giou * cost_giou
         )
+        if not torch.isfinite(C).all():
+            print(
+                "[HungarianMatcher] non-finite cost detected: "
+                f"cost_bbox_finite={torch.isfinite(cost_bbox).all().item()}, "
+                f"cost_class_finite={torch.isfinite(cost_class).all().item()}, "
+                f"cost_giou_finite={torch.isfinite(cost_giou).all().item()}, "
+                f"out_bbox_finite={torch.isfinite(out_bbox).all().item()}, "
+                f"tgt_bbox_finite={torch.isfinite(tgt_bbox).all().item()}, "
+                f"out_score_finite={torch.isfinite(out_score).all().item()}"
+            )
+            C = torch.nan_to_num(C, nan=1e9, posinf=1e9, neginf=1e9)
         # assign a very high cost (1e9) to invalid outputs and targets, so that we can
         # filter them out (in `_do_matching`) from bipartite matching results
         do_filtering = out_is_valid is not None or target_is_valid_padded is not None

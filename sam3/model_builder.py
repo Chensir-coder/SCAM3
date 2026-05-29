@@ -579,6 +579,9 @@ def build_sam3_image_model(
     enable_segmentation=True,
     enable_inst_interactivity=False,
     compile=False,
+    freeze_vision_backbone=False,
+    freeze_language_backbone=False,
+    freeze_semantic_seg_head=False,
 ):
     """
     Build SAM3 image model
@@ -591,6 +594,8 @@ def build_sam3_image_model(
         enable_segmentation: Whether to enable segmentation head
         enable_inst_interactivity: Whether to enable instance interactivity (SAM 1 task)
         compile_mode: To enable compilation, set to "default"
+        freeze_vision_backbone: Whether to freeze the visual encoder parameters
+        freeze_language_backbone: Whether to freeze the text encoder parameters
 
     Returns:
         A SAM3 image model
@@ -605,9 +610,13 @@ def build_sam3_image_model(
     vision_encoder = _create_vision_backbone(
         compile_mode=compile_mode, enable_inst_interactivity=enable_inst_interactivity
     )
+    if freeze_vision_backbone:
+        vision_encoder.requires_grad_(False)
 
     # Create text components
     text_encoder = _create_text_encoder(bpe_path)
+    if freeze_language_backbone:
+        text_encoder.requires_grad_(False)
 
     # Create visual-language backbone
     backbone = _create_vl_backbone(vision_encoder, text_encoder)
@@ -624,6 +633,8 @@ def build_sam3_image_model(
         if enable_segmentation
         else None
     )
+    if freeze_semantic_seg_head and segmentation_head is not None:
+        segmentation_head.semantic_seg_head.requires_grad_(False)
 
     # Create geometry encoder
     input_geometry_encoder = _create_geometry_encoder()

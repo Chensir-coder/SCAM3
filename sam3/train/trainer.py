@@ -956,7 +956,8 @@ class Trainer:
                     else:
                         return
 
-                self.scaler.scale(loss).backward()
+                backward_loss = loss / accum_steps
+                self.scaler.scale(backward_loss).backward()
                 loss_mts[loss_key].update(loss.item(), batch_size)
                 for extra_loss_key, extra_loss in extra_losses.items():
                     if extra_loss_key not in extra_loss_mts:
